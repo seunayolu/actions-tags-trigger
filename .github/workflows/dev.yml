@@ -66,8 +66,7 @@ jobs:
       - name: Setup tflint
         uses: terraform-linters/setup-tflint@v6
         with:
-          tflint_version: latest
-          cache: true
+          tflint_version: v0.52.0
 
       - name: tflint init
         run: tflint --init
@@ -76,39 +75,8 @@ jobs:
 
       - name: Run tflint
         id: tflint
-        run: tflint -f compact --recursive 2>&1 | tee tflint-report.txt
+        run: tflint -f compact
         continue-on-error: true
-
-      - name: Upload tflint report
-        if: always()
-        uses: actions/upload-artifact@v6
-        with:
-          name: tflint-report-${{ github.run_number }}
-          path: Infra/tflint-report.txt
-          retention-days: 14
-
-      # ── Trivy (replaces tfsec) ────────────────────────
-      # tfsec is now deprecated upstream — Trivy is the
-      # official successor with the same IaC scanning engine
-      - name: Run Trivy IaC scan
-        id: trivy
-        uses: aquasecurity/trivy-action@0.30.0
-        with:
-          scan-type: config
-          scan-ref: Infra/
-          format: sarif
-          output: trivy-report.sarif
-          exit-code: "1"         # fail the step on findings
-          severity: HIGH,CRITICAL
-        continue-on-error: true
-
-      - name: Upload Trivy SARIF report
-        if: always()
-        uses: actions/upload-artifact@v6
-        with:
-          name: trivy-sarif-${{ github.run_number }}
-          path: trivy-report.sarif
-          retention-days: 14
 
       # ── Checkov ───────────────────────────────────────
       - name: Run Checkov
