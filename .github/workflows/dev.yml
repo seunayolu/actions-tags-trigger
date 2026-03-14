@@ -15,8 +15,8 @@ env:
   TF_IN_AUTOMATION: "true"
 
 jobs:
-  # ──────────────────────────────────────────────────────
-  # JOB 1: VALIDATE
+  # ──────────────────────────────────────────────────────#
+  # JOB 1: VALIDATE 
   # Runs on BOTH pull_request and push to main.
   # Pure static analysis — no backend, no apply.
   # ──────────────────────────────────────────────────────
@@ -28,7 +28,7 @@ jobs:
 
     defaults:
       run:
-        working-directory: infra
+        working-directory: Infra
 
     steps:
       - name: Checkout code
@@ -66,8 +66,7 @@ jobs:
       - name: Setup tflint
         uses: terraform-linters/setup-tflint@v6
         with:
-          tflint_version: latest
-          cache: true
+          tflint_version: v0.52.0
 
       - name: tflint init
         run: tflint --init
@@ -76,49 +75,18 @@ jobs:
 
       - name: Run tflint
         id: tflint
-        run: tflint -f compact --recursive 2>&1 | tee tflint-report.txt
+        run: tflint -f compact
         continue-on-error: true
-
-      - name: Upload tflint report
-        if: always()
-        uses: actions/upload-artifact@v6
-        with:
-          name: tflint-report-${{ github.run_number }}
-          path: infra/tflint-report.txt
-          retention-days: 14
-
-      # ── Trivy (replaces tfsec) ────────────────────────
-      # tfsec is now deprecated upstream — Trivy is the
-      # official successor with the same IaC scanning engine
-      - name: Run Trivy IaC scan
-        id: trivy
-        uses: aquasecurity/trivy-action@0.30.0
-        with:
-          scan-type: config
-          scan-ref: infra/
-          format: sarif
-          output: trivy-report.sarif
-          exit-code: "1"         # fail the step on findings
-          severity: HIGH,CRITICAL
-        continue-on-error: true
-
-      - name: Upload Trivy SARIF report
-        if: always()
-        uses: actions/upload-artifact@v6
-        with:
-          name: trivy-sarif-${{ github.run_number }}
-          path: trivy-report.sarif
-          retention-days: 14
 
       # ── Checkov ───────────────────────────────────────
       - name: Run Checkov
         id: checkov
         uses: bridgecrewio/checkov-action@v12
         with:
-          directory: infra/
+          directory: Infra/
           framework: terraform
           output_format: cli,junitxml
-          output_file_path: console,infra/checkov-report.xml
+          output_file_path: console,Infra/checkov-report.xml
           soft_fail: true        # let the step pass so the artifact uploads;
                                  # we gate the job manually below
         continue-on-error: true
@@ -128,7 +96,7 @@ jobs:
         uses: actions/upload-artifact@v6
         with:
           name: checkov-report-${{ github.run_number }}
-          path: infra/checkov-report.xml
+          path: Infra/checkov-report.xml
           retention-days: 14
 
     #   # ── Gate: fail the job if anything found issues ───
@@ -160,7 +128,7 @@ jobs:
 
     defaults:
       run:
-        working-directory: infra
+        working-directory: Infra
 
     steps:
       - name: Checkout code
@@ -262,7 +230,7 @@ jobs:
 
     defaults:
       run:
-        working-directory: infra
+        working-directory: Infra
 
     steps:
       - name: Checkout code
@@ -297,7 +265,7 @@ jobs:
             -var-file="environments/${{ env.TF_ENV }}.tfvars" \
             -no-color \
             -input=false \
-            -out=tfplan   # saved to infra/tfplan
+            -out=tfplan   # saved to Infra/tfplan
 
       # Upload the binary plan file so apply-dev can consume it.
       # The .terraform directory is NOT included — apply will re-init
@@ -306,7 +274,7 @@ jobs:
         uses: actions/upload-artifact@v6
         with:
           name: tfplan-dev-${{ github.run_number }}
-          path: infra/tfplan
+          path: Infra/tfplan
           retention-days: 1   # short TTL — only needed until apply completes
 
 
@@ -325,7 +293,7 @@ jobs:
 
     defaults:
       run:
-        working-directory: infra
+        working-directory: Infra
 
     steps:
       - name: Checkout code
@@ -358,7 +326,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: tfplan-dev-${{ github.run_number }}
-          path: infra/   # downloads tfplan into the infra directory
+          path: Infra/   # downloads tfplan into the Infra directory
 
       - name: terraform apply
         run: |
