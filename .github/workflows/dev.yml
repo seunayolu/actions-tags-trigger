@@ -15,8 +15,8 @@ env:
   TF_IN_AUTOMATION: "true"
 
 jobs:
-  # ──────────────────────────────────────────────────────
-  # JOB 1: VALIDATE
+  # ──────────────────────────────────────────────────────#
+  # JOB 1: VALIDATE 
   # Runs on BOTH pull_request and push to main.
   # Pure static analysis — no backend, no apply.
   # ──────────────────────────────────────────────────────
