@@ -1,30 +1,32 @@
-name: Dev Pipeline
+name: Promote Pipeline
 
 on:
-  pull_request:
-    branches: [main]
   push:
-    branches: [main]
+    tags:
+      - 'testing-*'   # e.g. testing-1.2.0
+      - 'release-*'   # e.g. release-2.0.0
 
 permissions:
   contents: read
   pull-requests: write
 
 env:
-  TF_ENV: dev
   TF_IN_AUTOMATION: "true"
 
 jobs:
-  # ──────────────────────────────────────────────────────#
-  # JOB 1: VALIDATE 
-  # Runs on BOTH pull_request and push to main.
-  # Pure static analysis — no backend, no apply.
+  # ──────────────────────────────────────────────────────
+  # JOB 1: VALIDATE
+  # Runs on both testing-* and release-* tag pushes.
+  # Determines TF_ENV dynamically from the tag name so
+  # tflint uses the correct environment's AWS credentials.
   # ──────────────────────────────────────────────────────
   validate:
     name: Validate
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
-    environment: devacadev
+
+    # Resolve which environment to use based on the tag prefix.
+    # This controls which environment's secrets and vars are available.
+    environment: ${{ startsWith(github.ref_name, 'testing-') && 'testdevopsacad' || 'proddevopsprep' }}
 
     defaults:
       run:
@@ -33,6 +35,17 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
+
+      # Derive TF_ENV from the tag name at runtime.
+      # testing-1.2.0  → TF_ENV=testing
+      # release-2.0.0  → TF_ENV=prod
+      - name: Set TF_ENV from tag
+        run: |
+          if [[ "${{ github.ref_name }}" == testing-* ]]; then
+            echo "TF_ENV=testing" >> $GITHUB_ENV
+          else
+            echo "TF_ENV=prod" >> $GITHUB_ENV
+          fi
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v4
@@ -46,16 +59,11 @@ jobs:
 
       - name: terraform validate
         id: validate
-        # -backend=false skips all backend connectivity —
-        # validate only needs provider schemas, not real state
         run: |
           terraform init -backend=false
           terraform validate -no-color
 
       # ── tflint ────────────────────────────────────────
-      # Needs real AWS credentials so the aws ruleset plugin
-      # can validate instance types, AMIs, etc. against the
-      # actual AWS API
       - name: Configure AWS credentials for tflint
         uses: aws-actions/configure-aws-credentials@v6
         with:
@@ -67,6 +75,7 @@ jobs:
         uses: terraform-linters/setup-tflint@v6
         with:
           tflint_version: v0.52.0
+          cache: true
 
       - name: tflint init
         run: tflint --init
@@ -87,146 +96,42 @@ jobs:
           framework: terraform
           output_format: cli,junitxml
           output_file_path: console,Infra/checkov-report.xml
-          soft_fail: true        # let the step pass so the artifact uploads;
-                                 # we gate the job manually below
+          soft_fail: true
         continue-on-error: true
 
       - name: Upload Checkov JUnit report
         if: always()
         uses: actions/upload-artifact@v6
         with:
-          name: checkov-report-${{ github.run_number }}
+          name: checkov-report-${{ github.ref_name }}-${{ github.run_number }}
           path: Infra/checkov-report.xml
           retention-days: 14
 
-    #   # ── Gate: fail the job if anything found issues ───
-    #   # All tools ran and all reports uploaded above.
-    #   # Now we fail deliberately if any step was unhappy.
+    #   # ── Gate: fail if any tool found issues ───────────
     #   - name: Evaluate tool outcomes
     #     if: always()
     #     run: |
     #       FAILED=0
-    #       [ "${{ steps.fmt.outcome }}"     == "failure" ] && echo "::error::terraform fmt check failed — run 'terraform fmt -recursive' locally" && FAILED=1
-    #       [ "${{ steps.tflint.outcome }}"  == "failure" ] && echo "::error::tflint found issues — see tflint-report artifact" && FAILED=1
-    #       [ "${{ steps.trivy.outcome }}"   == "failure" ] && echo "::error::Trivy found HIGH/CRITICAL issues — see trivy-sarif artifact" && FAILED=1
-    #       [ "${{ steps.checkov.outcome }}" == "failure" ] && echo "::error::Checkov found violations — see checkov-report artifact" && FAILED=1
+    #       [ "${{ steps.fmt.outcome }}"     == "failure" ] && echo "::error::terraform fmt check failed" && FAILED=1
+    #       [ "${{ steps.tflint.outcome }}"  == "failure" ] && echo "::error::tflint found issues — see artifact" && FAILED=1
+    #       [ "${{ steps.checkov.outcome }}" == "failure" ] && echo "::error::Checkov found violations — see artifact" && FAILED=1
     #       exit $FAILED
 
 
   # ──────────────────────────────────────────────────────
-  # JOB 2: PLAN-DEV (PR only)
-  # Posts plan output as a PR comment so reviewers can
-  # see exactly what will change before approving.
-  # Does NOT save a plan file — this is for human review.
+  # JOB 2: PLAN (Testing)
+  # Runs only on testing-* tags after validate passes.
+  # Saves tfplan as artifact for apply-testing to consume.
   # ──────────────────────────────────────────────────────
-  plan-dev-pr:
-    name: Plan (Dev) — PR preview
+  plan-testing:
+    name: Plan (Testing)
     needs: validate
     runs-on: ubuntu-latest
-    environment: devacadev
-    if: github.event_name == 'pull_request'
+    environment: testdevopsacad
+    if: startsWith(github.ref_name, 'testing-')
 
-    defaults:
-      run:
-        working-directory: Infra
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v6
-
-      - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v4
-        with:
-          terraform_version: "~1.11"
-          terraform_wrapper: true   # required to capture stdout for the PR comment
-
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v6
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY_ID }}
-          aws-region: ${{ vars.AWS_REGION }}
-
-      - name: terraform init
-        run: |
-          terraform init \
-            -backend-config="bucket=${{ secrets.TF_BACKEND_BUCKET }}" \
-            -backend-config="key=iff/${{ env.TF_ENV }}/terraform.tfstate" \
-            -backend-config="region=${{ vars.AWS_REGION }}" \
-            -backend-config="encrypt=true" \
-            -backend-config="use_lockfile=true" \
-            -input=false
-
-      - name: terraform plan
-        id: plan
-        run: |
-          terraform plan \
-            -var-file="environments/${{ env.TF_ENV }}.tfvars" \
-            -no-color \
-            -input=false
-        continue-on-error: true   # allow comment to post even if plan errors
-
-      - name: Post plan as PR comment
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const planOut    = `${{ steps.plan.outputs.stdout }}`;
-            const planErr    = `${{ steps.plan.outputs.stderr }}`;
-            const planStatus = '${{ steps.plan.outcome }}';
-            const statusIcon = planStatus === 'success' ? '✅' : '❌';
-
-            const body = [
-              `### Terraform Plan — \`dev\` environment ${statusIcon}`,
-              `<details><summary>Show Plan Output</summary>`,
-              ``,
-              `\`\`\`hcl`,
-              planOut || planErr,
-              `\`\`\``,
-              `</details>`,
-              ``,
-              `*@${{ github.actor }} · Run [#${{ github.run_number }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})*`
-            ].join('\n');
-
-            // Replace previous plan comment on this PR to keep things clean
-            const { data: comments } = await github.rest.issues.listComments({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: context.issue.number,
-            });
-            for (const c of comments) {
-              if (c.body.includes('### Terraform Plan — `dev` environment')) {
-                await github.rest.issues.deleteComment({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  comment_id: c.id,
-                });
-              }
-            }
-
-            await github.rest.issues.createComment({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: context.issue.number,
-              body,
-            });
-
-      - name: Fail if plan errored
-        if: steps.plan.outcome == 'failure'
-        run: exit 1
-
-
-  # ──────────────────────────────────────────────────────
-  # JOB 3: PLAN-DEV (main merge)
-  # Generates and saves a concrete plan file as an artifact.
-  # The apply job below downloads and applies exactly this
-  # file — no re-planning, no drift between plan and apply.
-  # ──────────────────────────────────────────────────────
-  plan-dev-main:
-    name: Plan (Dev) — pre-apply
-    needs: validate
-    runs-on: ubuntu-latest
-    environment: devacadev
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    env:
+      TF_ENV: testing
 
     defaults:
       run:
@@ -265,31 +170,32 @@ jobs:
             -var-file="environments/${{ env.TF_ENV }}.tfvars" \
             -no-color \
             -input=false \
-            -out=tfplan   # saved to Infra/tfplan
+            -out=tfplan
 
-      # Upload the binary plan file so apply-dev can consume it.
-      # The .terraform directory is NOT included — apply will re-init
-      # using the same backend config and provider lock file.
       - name: Upload plan artifact
         uses: actions/upload-artifact@v6
         with:
-          name: tfplan-dev-${{ github.run_number }}
+          name: tfplan-testing-${{ github.run_number }}
           path: Infra/tfplan
-          retention-days: 1   # short TTL — only needed until apply completes
+          retention-days: 1
 
 
   # ──────────────────────────────────────────────────────
-  # JOB 4: APPLY-DEV (main merge only)
-  # Downloads the plan file from plan-dev-main and applies
-  # it. Because we apply a saved plan, what gets deployed
-  # is exactly what was shown in the plan step — no surprises.
+  # JOB 3: APPLY (Testing)
+  # Downloads the plan artifact from plan-testing and
+  # applies it. GitHub pauses this job here and waits
+  # for the required reviewer (devopsacad team) to approve
+  # in the GitHub Actions UI before proceeding.
   # ──────────────────────────────────────────────────────
-  apply-dev:
-    name: Apply (Dev)
-    needs: plan-dev-main
+  apply-testing:
+    name: Apply (Testing)
+    needs: plan-testing
     runs-on: ubuntu-latest
-    environment: devacadev
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    environment: testdevopsacad
+    if: startsWith(github.ref_name, 'testing-')
+
+    env:
+      TF_ENV: testing
 
     defaults:
       run:
@@ -325,8 +231,131 @@ jobs:
       - name: Download plan artifact
         uses: actions/download-artifact@v8
         with:
-          name: tfplan-dev-${{ github.run_number }}
-          path: Infra/   # downloads tfplan into the Infra directory
+          name: tfplan-testing-${{ github.run_number }}
+          path: Infra/
+
+      - name: terraform apply
+        run: |
+          terraform apply \
+            -input=false \
+            -no-color \
+            tfplan
+
+
+  # ──────────────────────────────────────────────────────
+  # JOB 4: PLAN (Prod)
+  # Runs only on release-* tags after validate passes.
+  # Saves tfplan as artifact for apply-prod to consume.
+  # ──────────────────────────────────────────────────────
+  plan-prod:
+    name: Plan (Prod)
+    needs: validate
+    runs-on: ubuntu-latest
+    environment: proddevopsprep
+    if: startsWith(github.ref_name, 'release-')
+
+    env:
+      TF_ENV: prod
+
+    defaults:
+      run:
+        working-directory: Infra
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: "~1.11"
+          terraform_wrapper: false
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY_ID }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: terraform init
+        run: |
+          terraform init \
+            -backend-config="bucket=${{ secrets.TF_BACKEND_BUCKET }}" \
+            -backend-config="key=iff/${{ env.TF_ENV }}/terraform.tfstate" \
+            -backend-config="region=${{ vars.AWS_REGION }}" \
+            -backend-config="encrypt=true" \
+            -backend-config="use_lockfile=true" \
+            -input=false
+
+      - name: terraform plan
+        run: |
+          terraform plan \
+            -var-file="environments/${{ env.TF_ENV }}.tfvars" \
+            -no-color \
+            -input=false \
+            -out=tfplan
+
+      - name: Upload plan artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: tfplan-prod-${{ github.run_number }}
+          path: Infra/tfplan
+          retention-days: 1
+
+
+  # ──────────────────────────────────────────────────────
+  # JOB 5: APPLY (Prod)
+  # Downloads the plan artifact from plan-prod and applies
+  # it. GitHub pauses here and waits for the required
+  # reviewer to approve before any prod changes land.
+  # ──────────────────────────────────────────────────────
+  apply-prod:
+    name: Apply (Prod)
+    needs: plan-prod
+    runs-on: ubuntu-latest
+    environment: proddevopsprep
+    if: startsWith(github.ref_name, 'release-')
+
+    env:
+      TF_ENV: prod
+
+    defaults:
+      run:
+        working-directory: Infra
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: "~1.11"
+          terraform_wrapper: false
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY_ID }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: terraform init
+        run: |
+          terraform init \
+            -backend-config="bucket=${{ secrets.TF_BACKEND_BUCKET }}" \
+            -backend-config="key=iff/${{ env.TF_ENV }}/terraform.tfstate" \
+            -backend-config="region=${{ vars.AWS_REGION }}" \
+            -backend-config="encrypt=true" \
+            -backend-config="use_lockfile=true" \
+            -input=false
+
+      - name: Download plan artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: tfplan-prod-${{ github.run_number }}
+          path: Infra/
 
       - name: terraform apply
         run: |
